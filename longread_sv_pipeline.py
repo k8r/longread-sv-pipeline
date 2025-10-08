@@ -19,10 +19,8 @@
 import argparse
 import subprocess
 import shlex
-import threading
-import itertools
-import sys
-import time
+import pysam
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -67,40 +65,82 @@ def summarize_fastq(fastq_path):
     
     return stats
 
+# Align reads to the reference genome, then convert, sort, and index the results
 def make_bam(reference_index, fastq_file, output_dir):
     reference_index = Path(reference_index).expanduser()
     fastq_file = Path(fastq_file).expanduser()
     output_dir = Path(output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    sam_path = output_dir / "sample.sam"
-    bam_path = output_dir / "sample.sorted.bam"
+    sam_path = output_dir / (fastq_file.stem + ".sam")
+    bam_path = output_dir / (fastq_file.stem + ".sorted.bam")
 
     # Align reads to given reference
     run_command(
         ["minimap2", "-t", "8", "-ax", "map-hifi", str(reference_index), str(fastq_file), "-o", str(sam_path)],
-        "Aligning reads with minimap2", capture_output=True, warn_about_long_process=True
+        "Aligning reads with minimap2", capture_output=False, warn_about_long_process=True
     )
     # Convert sam to bam and sort
     cmd = (
-        f"samtools view -bS {output_dir}/sample.sam | "
-        f"samtools sort -o {output_dir}/sample.sorted.bam"
+        f"samtools view -bS {sam_path} | "
+        f"samtools sort -o {bam_path}"
     )
     run_command(
         cmd,
-        "Converting SAM to sorted BAM", capture_output=True, warn_about_long_process=True
+        "Converting SAM to sorted BAM", capture_output=False, warn_about_long_process=True
     )
+    cmd = [
+        "samtools",
+        "index",
+        str(bam_path)
+    ]
+    run_command(cmd, f"Indexing BAM file: {bam_path.name}", capture_output=False, warn_about_long_process=True)
+
+    return bam_path
 
 # Run minimap2 to build an index from the provided reference genome
 def build_minimap2_index(reference_fasta, output_index):
     result = run_command(
         ["minimap2", "-d", str(output_index), str(reference_fasta)],
         description="Building Minimap2 index",
-        capture_output=True
+        capture_output=False
     )
 
+def make_vcf(fastq, bam, outputs_dir, ref):
+    vcf = Path(outputs_dir) / (Path(fastq).stem + ".sv.vcf")
+
+    cmd = [
+        "sniffles",
+        "--input", str(bam),
+        "--vcf", str(vcf),
+        "--reference", str(ref),
+        "--threads", "8",
+    ]
+
+    result = run_command(cmd, "Running Sniffles for structural variant detection", capture_output=False)
+    print((result.stdout or "") + (result.stderr or ""))
+
+    return vcf
+
+def summarize_svs(vcf_path):
+    vcf = pysam.VariantFile(vcf_path)
+    sv_counts = Counter()
+    print(f"\n*********** Structural Variant Summary ***********")
+    print(f"{'CHROM':<8} {'POS':<10} {'TYPE':<6} {'LEN':<8}")
+    print("-" * 40)
+
+    for rec in vcf.fetch():
+        svtype = rec.info.get("SVTYPE", "?")
+        svlen = rec.info.get("SVLEN", [0])[0] if isinstance(rec.info.get("SVLEN"), list) else rec.info.get("SVLEN", 0)
+        sv_counts[svtype] += 1
+        print(f"{rec.chrom:<8} {rec.pos:<10} {svtype:<6} {svlen:<8}")
+
+    print("\n*********** Counts by Type ***********")
+    for svtype, count in sv_counts.items():
+        print(f"{svtype}: {count}")
+
 def run_command(cmd, description, capture_output=False, warn_about_long_process=False):
-    print(f"\n\n=== {description} ===")
+    print(f"\n\n*********** {description} ***********")
     if isinstance(cmd, list):
         print(f"Command: {shlex.join(map(str, cmd))}")
     else:
@@ -167,8 +207,10 @@ if __name__ == "__main__":
         ref_index = args.reference.with_suffix(".mmi")
         build_minimap2_index(args.reference, ref_index)
 
-    # Align the FASTQ and build a sorted BAM
+    # Align the FASTQ, build a sorted BAM, find and print structural variants
     outputs_dir = SCRIPT_DIR / "Outputs" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    make_bam(ref_index, args.fastq, outputs_dir)
+    bam = make_bam(ref_index, args.fastq, outputs_dir)
+    vcf = make_vcf(args.fastq, bam, outputs_dir, args.reference)
+    summarize_svs(vcf)
             
         
