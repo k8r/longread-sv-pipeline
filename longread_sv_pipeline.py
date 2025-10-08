@@ -13,10 +13,57 @@
 #    - minimap2  v2.30-r1287
 #    - sniffles2 v2.6.3
 #
-# TO RUN: py ./longread_sv_pipeline.py
+# TO RUN: python ./longread_sv_pipeline.py -f <FASTQ input file> -r <reference FASTA> [-i <reference index>]
+# For example: python ./longread_sv_pipeline.py -f ./TestData/brca1_with_sva_hifi.fastq -r ~/human_reference_genome.fasta -i ~/ref.mmi
 
 import argparse
+import subprocess
 from pathlib import Path
+
+# Given a dictionary of FASTQ statistics,
+# check basic properties to confirm that the file appears to be a valid
+# long-read dataset.
+def is_fastq_valid_longread(stats):
+    num_reads = int(stats.get("num_seqs", 0).replace(",", ""))
+    avg_len = float(stats.get("avg_len", 0).replace(",", ""))
+    min_len = float(stats.get("min_len", 0).replace(",", ""))
+
+    issues = []
+    if num_reads == 0:
+        issues.append("no reads found in FASTQ file")
+    if avg_len < 1000:
+        issues.append(f"average read length ({avg_len:.0f} bp) is unusually short for HiFi data")
+    if min_len < 100:
+        issues.append(f"some reads are extremely short (min length {min_len:.0f} bp)")
+    
+    if issues:
+        return (False, "\n".join(issues))
+    return (True, "")
+
+# Print a summary of a FASTQ file’s statistics and return a dictionary of those values.
+def summarize_fastq(fastq_path):
+    try:
+        result = subprocess.run(
+            ["seqkit", "stats", fastq_path],
+            check=True,
+            text=True,
+            capture_output=True
+        )
+
+        lines = result.stdout.strip().splitlines()
+
+        header = lines[0].split()
+        values = lines[1].split()
+
+        stats = dict(zip(header, values))
+
+        print(result.stdout.strip())
+        print("\n")
+        
+        return stats
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error running seqkit: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -44,3 +91,14 @@ if __name__ == "__main__":
              "If not provided, the index will be generated automatically."
     )
     args = parser.parse_args()
+
+    # TODO - check that dependencies are installed
+
+    # Verify that the FASTQ file appears to contain valid long-read data
+    print("\n=== FASTQ Summary (seqkit stats) ===")
+    fastq_stats = summarize_fastq(args.fastq)
+    is_valid = is_fastq_valid_longread(fastq_stats)
+    if not is_valid[0]:
+        response = input(f"Your input FASTQ file has some issues:\n{is_valid[1]}. \n\nDo you want to continue? (y/n)")
+        if response != "y":
+            exit()
