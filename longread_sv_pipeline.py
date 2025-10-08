@@ -18,7 +18,15 @@
 
 import argparse
 import subprocess
+import shlex
+import threading
+import itertools
+import sys
+import time
+from datetime import datetime
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Given a dictionary of FASTQ statistics,
 # check basic properties to confirm that the file appears to be a valid
@@ -42,28 +50,81 @@ def is_fastq_valid_longread(stats):
 
 # Print a summary of a FASTQ file’s statistics and return a dictionary of those values.
 def summarize_fastq(fastq_path):
+    result = run_command(
+        ["seqkit", "stats", fastq_path],
+        description="FASTQ Summary (seqkit stats)",
+        capture_output=True
+    )
+
+    lines = result.stdout.strip().splitlines()
+
+    header = lines[0].split()
+    values = lines[1].split()
+
+    stats = dict(zip(header, values))
+
+    print(result.stdout.strip())
+    
+    return stats
+
+def make_bam(reference_index, fastq_file, output_dir):
+    reference_index = Path(reference_index).expanduser()
+    fastq_file = Path(fastq_file).expanduser()
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sam_path = output_dir / "sample.sam"
+    bam_path = output_dir / "sample.sorted.bam"
+
+    # Align reads to given reference
+    run_command(
+        ["minimap2", "-t", "8", "-ax", "map-hifi", str(reference_index), str(fastq_file), "-o", str(sam_path)],
+        "Aligning reads with minimap2", capture_output=True, warn_about_long_process=True
+    )
+    # Convert sam to bam and sort
+    cmd = (
+        f"samtools view -bS {output_dir}/sample.sam | "
+        f"samtools sort -o {output_dir}/sample.sorted.bam"
+    )
+    run_command(
+        cmd,
+        "Converting SAM to sorted BAM", capture_output=True, warn_about_long_process=True
+    )
+
+# Run minimap2 to build an index from the provided reference genome
+def build_minimap2_index(reference_fasta, output_index):
+    result = run_command(
+        ["minimap2", "-d", str(output_index), str(reference_fasta)],
+        description="Building Minimap2 index",
+        capture_output=True
+    )
+
+def run_command(cmd, description, capture_output=False, warn_about_long_process=False):
+    print(f"\n\n=== {description} ===")
+    if isinstance(cmd, list):
+        print(f"Command: {shlex.join(map(str, cmd))}")
+    else:
+        print(f"Command: {cmd}")
+    if warn_about_long_process:
+        print(f"Please be patient. This process can take a few minutes.")
+
     try:
         result = subprocess.run(
-            ["seqkit", "stats", fastq_path],
+            cmd,
+            shell=isinstance(cmd, str),
             check=True,
             text=True,
-            capture_output=True
+            capture_output=capture_output
         )
-
-        lines = result.stdout.strip().splitlines()
-
-        header = lines[0].split()
-        values = lines[1].split()
-
-        stats = dict(zip(header, values))
-
-        print(result.stdout.strip())
-        print("\n")
-        
-        return stats
-
+        return result
     except subprocess.CalledProcessError as e:
-        print(f"Error running seqkit: {e}")
+        print(f"Error: {e}")
+        if e.stderr:
+            print(e.stderr)
+        exit(1)
+    except FileNotFoundError:
+        print(f"Command not found: {cmd[0]}. Make sure it's installed and in your PATH.")
+        exit(1)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -92,13 +153,22 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # TODO - check that dependencies are installed
-
     # Verify that the FASTQ file appears to contain valid long-read data
-    print("\n=== FASTQ Summary (seqkit stats) ===")
     fastq_stats = summarize_fastq(args.fastq)
     is_valid = is_fastq_valid_longread(fastq_stats)
     if not is_valid[0]:
         response = input(f"Your input FASTQ file has some issues:\n{is_valid[1]}. \n\nDo you want to continue? (y/n)")
         if response != "y":
             exit()
+
+    # Index the given reference genome, if the index has not been provided (save in the same directory as the reference genome)
+    ref_index = args.index
+    if not args.index:
+        ref_index = args.reference.with_suffix(".mmi")
+        build_minimap2_index(args.reference, ref_index)
+
+    # Align the FASTQ and build a sorted BAM
+    outputs_dir = SCRIPT_DIR / "Outputs" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    make_bam(ref_index, args.fastq, outputs_dir)
+            
+        
