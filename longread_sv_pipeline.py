@@ -11,10 +11,14 @@
 # 2) External tools (tested versions):
 #    - seqkit    v2.10.1
 #    - minimap2  v2.30-r1287
+#    - samtools  v1.22.1
 #    - sniffles2 v2.6.3
 #
+# 3) Python dependency (tested version):
+#    - pysam     v0.23.3
+#
 # TO RUN: python ./longread_sv_pipeline.py -f <FASTQ input file> -r <reference FASTA> [-i <reference index>]
-# For example: python ./longread_sv_pipeline.py -f ./TestData/brca1_with_sva_hifi.fastq -r ~/human_reference_genome.fasta -i ~/ref.mmi
+# For example: python ./longread_sv_pipeline.py -f ./TestData/brca1_with_sva_hifi.fastq -r ./TestData/chr17.fasta -i ./TestData/chr17.mmi
 
 import argparse
 import subprocess
