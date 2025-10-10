@@ -18,7 +18,7 @@
 #    - pysam     v0.23.3
 #
 # TO RUN: python ./longread_sv_pipeline.py -f <FASTQ input file> -r <reference FASTA> [-i <reference index>]
-# For example: python ./longread_sv_pipeline.py -f ./TestData/brca1_with_sva_hifi.fastq -r ./TestData/chr17.fasta -i ./TestData/chr17.mmi
+# For example: python ./longread_sv_pipeline.py -f ./TestData/brca1_with_sva_hifi.fastq -r ./TestData/chr17.fasta
 
 import argparse
 import subprocess
