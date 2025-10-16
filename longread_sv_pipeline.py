@@ -307,6 +307,7 @@ if __name__ == "__main__":
     # Summarize the SVs - their coordinates, type, support, coverage, overlapping genes, etc.
     svs = get_svs(vcf, bam)
     svs_bed = get_svs_as_bed(svs)
+    print(svs_bed)
     summarize_svs(svs, svs_bed, args.annotation)
 
             
