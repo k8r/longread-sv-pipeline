@@ -34,6 +34,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+# Represents a structural variant and stores any overlapping genes identified during annotation.
 class StructuralVariant:
     def __init__(self, chrom, start, end, sv_type, support, coverage, length=None):
         self.chrom = chrom
@@ -41,7 +42,13 @@ class StructuralVariant:
         self.end = end
         self.sv_type = sv_type
         self.support = support
+        self.coverage = coverage
         self.length = length if length is not None else end - start
+        self.overlapping_genes = []
+
+    def add_overlapping_gene(self, gene):
+        if gene not in self.overlapping_genes:
+            self.overlapping_genes.append(gene)
 
 # Given a dictionary of FASTQ statistics,
 # check basic properties to confirm that the file appears to be a valid
@@ -82,7 +89,7 @@ def summarize_fastq(fastq_path):
     
     return stats
 
-# Align reads to the reference genome, then convert, sort, and index the results
+# Align reads to the reference genome, then convert, sort, and index the results.
 def make_bam(reference_index, fastq_file, output_dir):
     reference_index = Path(reference_index).expanduser()
     fastq_file = Path(fastq_file).expanduser()
@@ -115,7 +122,7 @@ def make_bam(reference_index, fastq_file, output_dir):
 
     return bam_path
 
-# Run minimap2 to build an index from the provided reference genome
+# Run minimap2 to build an index from the provided reference genome.
 def build_minimap2_index(reference_fasta, output_index):
     result = run_command(
         ["minimap2", "-d", str(output_index), str(reference_fasta)],
@@ -123,6 +130,7 @@ def build_minimap2_index(reference_fasta, output_index):
         capture_output=False
     )
 
+# Runs Sniffles to call structural variants from the aligned reads and outputs a VCF file.
 def make_vcf(fastq, bam, outputs_dir, ref):
     vcf = Path(outputs_dir) / (Path(fastq).stem + ".sv.vcf")
 
@@ -138,7 +146,7 @@ def make_vcf(fastq, bam, outputs_dir, ref):
 
     return vcf
 
-# Returns a BedTool object containing the given structural variants
+# Returns a BedTool object containing the given structural variants.
 def get_svs_as_bed(svs):
     lines = []
     for svtype, sv_list in svs.items():
@@ -147,12 +155,37 @@ def get_svs_as_bed(svs):
             lines.append(f"{sv.chrom}\t{sv.start}\t{sv.end}")
     return BedTool("\n".join(lines) + "\n", from_string=True)
 
-# Displays details for each structural variant - such as type, length, and coverage - along with overlapping genes
-def summarize_svs(svs, svs_bed, annotation_file):
+# Runs bedtools intersect to find genes that overlap the given structural variant.
+def annotate_svs(svs, svs_bed, annotation_file, overlaps_file):
     annotation = BedTool(annotation_file)
     overlaps = svs_bed.intersect(annotation, wa=True, wb=True)
     for feature in overlaps:
-        print(feature)
+        sv_chrom = feature[0]
+        sv_start = int(feature[1])
+        sv_end = int(feature[2])
+        gene_name = feature[-1]  # assumes gene name is last column in annotation
+
+        for sv_list in svs.values():
+            for sv in sv_list:
+                if sv.chrom == sv_chrom and sv.start == sv_start and sv.end == sv_end:
+                    sv.add_overlapping_gene(gene_name)
+    
+    overlaps.saveas(str(overlaps_file))
+
+# Displays details for each structural variant - such as type, length, and coverage - along with overlapping genes.
+def summarize_svs(svs):
+
+    print(f"\n*********** Structural Variant Summary ***********")
+    print(f"{'CHROM':<8} {'POS':<10} {'TYPE':<6} {'LEN':<8} {'SUPPORT':<8} {'COVERAGE':<10} {'OVERLAPPING GENES':<20}")
+    print("-" * 70)
+
+    for sv_list in svs.values():
+        for sv in sv_list:
+            print(f"{sv.chrom:<8} {sv.start:<10} {sv.sv_type:<6} {sv.length:<8} {sv.support:<8} {sv.coverage:<10} {', '.join(sv.overlapping_genes):<20}")
+
+    print("\n*********** Counts by Type ***********")
+    for svtype, svvalue in svs.items():
+        print(f"{svtype}: {len(svvalue)}")
 
 # Given a VCF and BAM file, returns a dict of SV objects representing structural variants with sufficient read coverage.
 def get_svs(vcf_path, bam_path):
@@ -183,45 +216,6 @@ def get_svs(vcf_path, bam_path):
             new_sv = StructuralVariant(rec.chrom, rec.pos, rec.pos + svlen, svtype, support, coverage, svlen)
             svs.setdefault(svtype, []).append(new_sv)
     return svs
-
-def summarize_svs_old(vcf_path, bam_path, annotation):
-    vcf = pysam.VariantFile(vcf_path)
-    sv_counts = Counter()
-
-    cmd = (
-        f"samtools depth {bam_path} | awk '{{sum+=$3; n++}} END {{if(n>0) print sum/n; else print 0}}'"
-    )
-    result = run_command(cmd, "Calculating average coverage (nonzero positions only)", capture_output=True)
-    average_coverage = float(result.stdout.strip())
-
-    print(f"\n*********** Structural Variant Summary ***********")
-    print(f"{'CHROM':<18} {'POS':<10} {'TYPE':<6} {'LEN':<8} {'SUPPORT':<8} {'COVERAGE':<8}")
-    print("-" * 70)
-
-    for rec in vcf.fetch():
-        svtype = rec.info.get("SVTYPE", "?")
-
-        svlen_field = rec.info.get("SVLEN", 0)
-        svlen = svlen_field[0] if isinstance(svlen_field, (list, tuple)) else svlen_field
-        support_field = rec.info.get("SUPPORT", 0)
-        support = support_field[0] if isinstance(support_field, (list, tuple)) else support_field
-
-        depth_field = rec.info.get("COVERAGE", "NA")
-        coverage = depth_field[0] if isinstance(depth_field, (list, tuple)) else depth_field
-
-        sv_counts[svtype] += 1
-
-        # Only retain SVs with coverage greater than 25% of the average coverage across all detected SVs.
-        # This helps filter out likely noise and false positives. Such low-coverage SVs can occur when
-        # using a partial reference: reads originating from outside the target region may be forced to
-        # align imperfectly to the available reference, producing false variant calls.
-        if coverage > average_coverage * .25:
-            print(f"{rec.chrom:<18} {rec.pos:<10} {svtype:<6} {svlen:<8} {support:<8} {coverage:<8}")
-
-
-    print("\n*********** Counts by Type ***********")
-    for svtype, count in sv_counts.items():
-        print(f"{svtype}: {count}")
 
 def run_command(cmd, description, capture_output=False, warn_about_long_process=False):
     print(f"\n\n*********** {description} ***********")
@@ -307,8 +301,8 @@ if __name__ == "__main__":
     # Summarize the SVs - their coordinates, type, support, coverage, overlapping genes, etc.
     svs = get_svs(vcf, bam)
     svs_bed = get_svs_as_bed(svs)
-    print(svs_bed)
-    summarize_svs(svs, svs_bed, args.annotation)
+    annotate_svs(svs, svs_bed, args.annotation, outputs_dir / (Path(args.fastq).stem + ".bed")) 
+    summarize_svs(svs)
 
             
         
